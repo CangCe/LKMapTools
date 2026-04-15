@@ -2,12 +2,11 @@
     "DEBUGMODE": true,
     "MINIMAP": {
         "top": 84,
-        "left": 2347,
+        "left": 2360,
         "width": 160,
         "height": 160
     },
     "MATCHTYPE": "FLANN",
-    "WINDOW_GEOMETRY": "400x550+1500+100",
     "VIEW_SIZE": 400,
     "LOGIC_MAP_PATH": "assest/raw.png",
     "DISPLAY_MAP_PATH": "assest/raw.png",

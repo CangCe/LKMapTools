@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import mss
 import tkinter as tk
+from tkinter import ttk
 from tkinter import messagebox
 from PIL import Image, ImageTk, ImageDraw
 import time
@@ -21,6 +22,12 @@ MIN_MATCH_COUNT = config.ORB_MIN_MATCH_COUNT  # 增加最小匹配数要求
 CONFIG_FILE = "config.json"
 MATCHTYPE = config.MATCHTYPE
 selector_event = threading.Event()
+WINDOW_GEOMETRY = "400x630+1500+100"
+resource_type_dicts = {
+    "采集资源":(701,737),
+    "宝箱":(301,322),
+    "眠枭之星":(802,803)
+}
 
 def super_enhance(image, isPlayer=False): #return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     # 转为灰度
@@ -33,7 +40,7 @@ def super_enhance(image, isPlayer=False): #return cv2.cvtColor(image, cv2.COLOR_
 
 
 class BigMapWindow(tk.Toplevel):
-    def __init__(self, master, map_img, markers, icon_cache):
+    def __init__(self, master, map_img, markers, icon_cache, resource_type_selected_items):
         super().__init__(master)
         self.title("全图预览 - 鼠标滚轮缩放 / 左键拖拽")
         self.geometry("1000x800")
@@ -43,6 +50,7 @@ class BigMapWindow(tk.Toplevel):
         self.icon_cache = icon_cache
 
         # 烘焙原尺寸大图 (包含图标)
+        self.resource_type_selected_items = resource_type_selected_items
         self.baked_full_image = self.bake_static_map()
         self.orig_w, self.orig_h = self.baked_full_image.size
 
@@ -91,6 +99,18 @@ class BigMapWindow(tk.Toplevel):
         for m in self.markers:
             icon_set = self.icon_cache.get(str(m['type']))
             if not icon_set: continue
+
+            m_type = int(m['type'])
+            is_visible = False
+            for category_name in self.resource_type_selected_items:
+                # 获取该分类对应的 ID 范围
+                range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
+                if range_min <= m_type <= range_max:
+                    is_visible = True
+                    break
+
+            if not is_visible:
+                continue
 
             # 根据状态选择图标
             icon = icon_set["pil_gray"] if m.get('is_collected') else icon_set["pil_normal"]
@@ -218,11 +238,12 @@ class MapTrackerApp:
         log_step("正在尝试建立主root")
         self.root = root
         self.root.title("ORB算法小地图定位工具")
+        self.status_text_id = None
 
         # --- 窗口属性设置 ---
         self.root.attributes("-topmost", True)
         # --- 使用配置文件中的悬浮窗几何设置 ---
-        self.root.geometry(config.WINDOW_GEOMETRY)
+        self.root.geometry(WINDOW_GEOMETRY)
         # --- 使用配置文件中的截图区域
         self.minimap_region = config.MINIMAP
         self.last_pos = None
@@ -240,6 +261,7 @@ class MapTrackerApp:
         self.image_on_canvas = None
 
         # 重置按钮
+        log_step("正在加载按钮")
         self.reset_btn = tk.Button(
             root,
             text="手动重置定位 (全图扫描)",
@@ -281,6 +303,31 @@ class MapTrackerApp:
         )
         self.auto_collect_cb.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # -- 开启最近路线规划
+        self.auto_route_planning_var = tk.BooleanVar(value=False)
+        self.auto_route_planning_cb = tk.Checkbutton(
+            root,
+            text="开启最近路线规划-施工中",
+            variable=self.auto_route_planning_var,
+            bg='#2b2b2b',
+            fg='white',
+            selectcolor='#3c3f41',
+            activebackground='#2b2b2b',
+            activeforeground='white'
+        )
+        self.auto_route_planning_cb.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # -- 下拉选择资源类型
+        self.resource_type_options = []
+        self.resource_type_selected_items = []
+        self.resource_type_vars = {}
+        self.resource_type_popup = None
+        self.resource_type_text = "请选择"
+        self.resource_type_button = tk.Button(root, text=self.resource_type_text, relief="groove",
+                                bg="white", anchor="w", command=self.resource_type_toggle_popup)
+        self.resource_type_button.pack(fill="x", expand=True)
+
+
         # -- 大地图按钮
         self.big_map_btn = tk.Button(
             root, text="打开大地图预览", command=self.open_big_map,
@@ -291,8 +338,15 @@ class MapTrackerApp:
 
         # 多线程初始化
         self.frame_queue = queue.Queue(maxsize=1) # 队列初始化
-        self.current_pos = (None, None)  # 存储计算线程算出的最新坐标
         self.is_running = True
+
+        self.current_pos = (None, None)  # 存储计算线程算出的最新坐标
+
+        import collections
+        self.pos_history_x = collections.deque(maxlen=5)  # 保留最近5帧
+        self.pos_history_y = collections.deque(maxlen=5)
+
+
 
         # 启动截图线程
         self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
@@ -359,7 +413,7 @@ class MapTrackerApp:
 
 
         if MATCHTYPE == "BF":
-            self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)  # BF初始化
+            self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)  # BF初始化
         elif MATCHTYPE == "FLANN":
             index_params = dict(
                 algorithm=6,
@@ -390,6 +444,12 @@ class MapTrackerApp:
             log_step(f"大地图特征点总数: {len(self.kp_big)}")
 
         # 加载资源点位数据
+        # --- 提取所有唯一的资源类型
+        self.resource_type_options = ["采集资源","宝箱","眠枭之星"]
+        # 默认全选
+        self.resource_type_selected_items = self.resource_type_options.copy()
+        self.resource_type_button.config(text=f"过滤资源: 已选 {len(self.resource_type_options)} 类")
+
         self.marker_data = self.load_markers(config.POINTS_PATH)
         # 加载图标并缓存（包含灰色版本）
         self.icon_cache = self.prep_icons(r"assest/icons")
@@ -403,6 +463,7 @@ class MapTrackerApp:
         cv2.circle(self.minimap_mask, (mask_w // 2, mask_h // 2), (mask_w // 2) - 5, 255, -1)
         # --- 预先定义小地图的中心点坐标 (用于后面的透视变换计算)
         self.mini_center_pt = np.float32([[[mask_w / 2, mask_h / 2]]])
+
         self.status_label.destroy()
 
     def run_selector_if_needed(self,force=False):
@@ -456,6 +517,10 @@ class MapTrackerApp:
         if self.smooth_x is not None:
             center_x, center_y = int(self.smooth_x), int(self.smooth_y)
             if found:
+                # 隐藏提示文字
+                if self.status_text_id:
+                    self.canvas.itemconfig(self.status_text_id, state="hidden")
+
                 half_view = config.VIEW_SIZE // 2
                 x1, y1 = center_x - half_view, center_y - half_view
                 x2, y2 = center_x + half_view, center_y + half_view
@@ -480,6 +545,22 @@ class MapTrackerApp:
                 # 遍历所有标记，决定移动、显示还是隐藏
                 for m in self.marker_data:
                     m_id = m['id']
+                    m_type = m['type']
+
+                    # 判断该点位所属的分类是否被选中
+                    is_visible = False
+                    for category_name in self.resource_type_selected_items:
+                        # 获取该分类对应的 ID 范围
+                        range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
+                        if range_min <= int(m_type) <= range_max:
+                            is_visible = True
+                            break
+
+                    # 如果没被选中，直接隐藏并跳过
+                    if not is_visible:
+                        if m_id in self.canvas_icons:
+                            self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
+                        continue
 
                     # 视锥剔除与距离计算
                     if x1 <= m['pixel_x'] <= x2 and y1 <= m['pixel_y'] <= y2:
@@ -542,6 +623,32 @@ class MapTrackerApp:
                 else:
                     # 定位丢失：画白圈
                     self.canvas.create_oval(bbox, outline="white", width=2)
+        else:
+            # 隐藏地图底图和所有图标
+            if hasattr(self, 'bg_image_id') and self.bg_image_id:
+                self.canvas.itemconfig(self.bg_image_id, state="hidden")
+
+            # 隐藏所有动态图标 (利用 tags 批量操作)
+            self.canvas.itemconfigure("all", state="hidden")
+
+            # 2. 显示或更新提示文字
+            display_text = "计算匹配定位锚点中..."
+            center_pt = config.VIEW_SIZE // 2
+
+            if not self.status_text_id:
+                # 第一次创建：白色文字，带一点点阴影效果（创建两个 text）
+                self.status_text_id = self.canvas.create_text(
+                    center_pt, center_pt,
+                    text=display_text,
+                    fill="white",
+                    font=("微软雅黑", 14, "bold"),
+                    justify=tk.CENTER,
+                    tags="status_msg"
+                )
+
+            else:
+                self.canvas.itemconfig(self.status_text_id, state="normal", text=display_text)
+                self.canvas.tag_raise(self.status_text_id)
 
         if need_save and int(time.time() * 10) % 10 == 0:
             self.save_picking_data(config.PICKINGDATA_PATH)
@@ -684,6 +791,44 @@ class MapTrackerApp:
                 "custom_markers": custom_markers
             }, f, ensure_ascii=False, indent=4)
 
+    # def load_markers(self, json_path):
+    #     """加载资源点并转换坐标"""
+    #     # --- 这里的参数必须和拼接大图时的参数完全一致 ---
+    #     X_MIN = -12
+    #     Y_MIN = -11
+    #     TILE_SIZE = 256
+    #     SCALE = 1
+    #     # --------------------------------------------
+    #     collected_ids = self.load_picking_data(config.PICKINGDATA_PATH)  # 获取已采集列表
+    #     processed_markers = []
+    #     try:
+    #         with open(json_path, 'r', encoding='utf-8') as f:
+    #             data = json.load(f)
+    #             # 假设 JSON 结构是包含 'points' 列表的
+    #             points = data if isinstance(data, list) else data.get('points', [])
+    #
+    #             for item in points:
+    #                 lat = item['point']['lat']
+    #                 lng = item['point']['lng']
+    #                 m_id = item.get('id')
+    #
+    #                 # 核心换算公式
+    #                 px = int((lng / TILE_SIZE - X_MIN) * TILE_SIZE * SCALE)
+    #                 py = int((lat / TILE_SIZE - Y_MIN) * TILE_SIZE * SCALE)
+    #
+    #                 processed_markers.append({
+    #                     'id': m_id,
+    #                     'type': str(item.get('markType')),  # 转为字符串方便匹配文件名
+    #                     'pixel_x': px,
+    #                     'pixel_y': py,
+    #                     'is_collected': m_id in collected_ids  # 初始状态
+    #                 })
+    #         log_step(f"成功加载 {len(processed_markers)} 个资源点")
+    #     except Exception as e:
+    #         log_step(f"加载点位失败: {e}")
+    #
+    #     return processed_markers
+
     def load_markers(self, json_path):
         """加载资源点并转换坐标"""
         # --- 这里的参数必须和拼接大图时的参数完全一致 ---
@@ -698,24 +843,42 @@ class MapTrackerApp:
             with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 # 假设 JSON 结构是包含 'points' 列表的
-                points = data if isinstance(data, list) else data.get('points', [])
+                points_dict = data if isinstance(data, dict) else {}
 
-                for item in points:
-                    lat = item['point']['lat']
-                    lng = item['point']['lng']
-                    m_id = item.get('id')
+                for item in self.resource_type_selected_items:
+                    type_range = resource_type_dicts[item]
+                    for type_str,value_list in points_dict.items():
+                        if value_list is None or not isinstance(value_list, list):
+                            continue
 
-                    # 核心换算公式
-                    px = int((lng / TILE_SIZE - X_MIN) * TILE_SIZE * SCALE)
-                    py = int((lat / TILE_SIZE - Y_MIN) * TILE_SIZE * SCALE)
+                        try:
+                            type_int = int(type_str)
+                        except ValueError:
+                            continue  # 跳过非数字的 Key
 
-                    processed_markers.append({
-                        'id': m_id,
-                        'type': str(item.get('markType')),  # 转为字符串方便匹配文件名
-                        'pixel_x': px,
-                        'pixel_y': py,
-                        'is_collected': m_id in collected_ids  # 初始状态
-                    })
+                        if type_range[0] <= type_int <= type_range[1]:
+                            for point in value_list:
+                                # 获取坐标（增加 get 容错）
+                                pt = point.get('point', {})
+                                lat = pt.get('lat')
+                                lng = pt.get('lng')
+
+                                if lat is None or lng is None:
+                                    continue
+
+                                m_id = point.get('id')
+
+                                # 核心换算公式
+                                px = int((lng / TILE_SIZE - X_MIN) * TILE_SIZE * SCALE)
+                                py = int((lat / TILE_SIZE - Y_MIN) * TILE_SIZE * SCALE)
+
+                                processed_markers.append({
+                                    'id': m_id,
+                                    'type': str(point.get('markType')),
+                                    'pixel_x': px,
+                                    'pixel_y': py,
+                                    'is_collected': m_id in collected_ids
+                                })
             log_step(f"成功加载 {len(processed_markers)} 个资源点")
         except Exception as e:
             log_step(f"加载点位失败: {e}")
@@ -767,14 +930,14 @@ class MapTrackerApp:
                     time.sleep(0.1)
                     continue
                 try:
-                    # 1. 截图
+                    # 截图
                     screenshot = sct.grab(self.minimap_region)
                     minimap_bgr = np.array(screenshot)
 
-                    # 2. 图像增强/灰度化 (把这一步放在截图线程，分担主计算线程的压力)
+                    # 图像增强/灰度化 (把这一步放在截图线程，分担主计算线程的压力)
                     gray = super_enhance(minimap_bgr, isPlayer=False)
 
-                    # 3. 压入队列，保持最新帧
+                    # 压入队列，保持最新帧
                     if self.frame_queue.full():
                         try:
                             self.frame_queue.get_nowait()  # 如果队列满了，丢弃旧帧
@@ -782,9 +945,8 @@ class MapTrackerApp:
                             pass
                     self.frame_queue.put(gray)
 
-                    # 4. 核心降温：限制截图帧率
-                    # 0.033 秒约等于 30 FPS。小地图定位 20~30 FPS 完全足够了。
-                    # 这一行是把你的 CPU 占用从 40% 降到 15% 以下的关键！
+                    # 核心降温：限制截图帧率
+                    # 0.033 秒约等于 30 FPS
                     time.sleep(0.033)
 
                 except Exception as e:
@@ -837,20 +999,41 @@ class MapTrackerApp:
                             self.consecutive_failures = self.global_search_threshold
                             continue
 
-                    # --- 执行匹配 ---
                     if MATCHTYPE == "BF":
-                        matches = self.bf.match(des_mini, current_des_big)
+                        # k=2 表示返回最近的两个匹配点
+                        matches = self.bf.knnMatch(des_mini, current_des_big, k=2)
                     elif MATCHTYPE == "FLANN":
-                        matches = self.flann.match(des_mini, current_des_big)
+                        matches = self.flann.knnMatch(des_mini, current_des_big, k=2)
 
-                    good_matches = [m for m in matches if m.distance < 50]
-                    good_matches = sorted(good_matches, key=lambda x: x.distance)[:80]
+                    good_matches = []
+                    # 使用配置中的比例，或者写死 0.75
+                    ratio_thresh = getattr(config, 'ORB_RATIO', config.ORB_RATIO)
+
+                    for match_pair in matches:
+                        if len(match_pair) == 2:
+                            m, n = match_pair
+                            # 核心比率测试：最优匹配的距离必须明显小于次优匹配
+                            if m.distance < ratio_thresh * n.distance:
+                                good_matches.append(m)
+                        elif len(match_pair) == 1:
+                            good_matches.append(match_pair[0])
+
+                    # 取质量最高的前 100 个点即可，避免过多反而引入噪点
+                    good_matches = sorted(good_matches, key=lambda x: x.distance)[:100]
 
                     if len(good_matches) >= config.ORB_MIN_MATCH_COUNT:
                         src_pts = np.float32([kp_mini[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                         dst_pts = np.float32([current_kp_big[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-                        M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC,ransacReprojThreshold=3.0) #部分仿射变换
+                        #M, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC,ransacReprojThreshold=3.0) #部分仿射变换
+
+                        # 降低重投影误差阈值到 1.5，提高精度；增加迭代次数，保证能找到最优解
+                        M, inliers = cv2.estimateAffinePartial2D(
+                            src_pts, dst_pts,
+                            method=cv2.RANSAC,
+                            ransacReprojThreshold=1.5,
+                            maxIters=2000
+                        )
 
                         if M is not None:
                             s = np.sqrt(M[0, 0] ** 2 + M[0, 1] ** 2) #部分仿射变换
@@ -872,14 +1055,23 @@ class MapTrackerApp:
                                             log_step("-》匹配结果跳变异常，放弃更新")
                                             continue
 
+                                # 中位数滤波
                                 if (0 <= raw_x <= self.map_width) and (0 <= raw_y <= self.map_height):
-                                    self.last_x, self.last_y = raw_x, raw_y
-                                    self.current_pos = (raw_x, raw_y)
+                                    # 将当前计算坐标加入队列
+                                    self.pos_history_x.append(raw_x)
+                                    self.pos_history_y.append(raw_y)
+
+                                    # 使用中位数滤波剔除离群噪点帧
+                                    median_x = int(np.median(self.pos_history_x))
+                                    median_y = int(np.median(self.pos_history_y))
+
+                                    self.last_x, self.last_y = median_x, median_y
+                                    self.current_pos = (median_x, median_y)  # 输出过滤后的稳态坐标
                                     self.consecutive_failures = 0
                                     self.found = True
 
                             elif DEBUG_MODE:
-                                log_step("->匹配结果缩放异常，放弃更新")
+                                log_step("->匹配结果缩放异常，尝试计算其他锚点")
                     else:
                         self.consecutive_failures += 1
                         self.found = False
@@ -888,15 +1080,17 @@ class MapTrackerApp:
                     self.consecutive_failures += 1
                     self.found = False
 
-                # 注意：匹配线程现在不需要强行 sleep 了，它的速度由 frame_queue 的供给速度决定！
-                # 只要 capture_loop 限制了 30FPS，match_loop 最多也就跑 30 次。
-
             except Exception as e:
                 log_step(f"匹配线程发生错误: {e}")
                 time.sleep(1)
 
     def reset_location(self):
         """手动清空状态，强制进入全局匹配模式"""
+        # 清空滤波队列
+        if hasattr(self, 'pos_history_x'):
+            self.pos_history_x.clear()
+            self.pos_history_y.clear()
+
         self.last_x = None
         self.last_y = None
         self.current_pos = (None, None)
@@ -916,7 +1110,7 @@ class MapTrackerApp:
         # 确保 logic_map_bgr 已经转为 PIL 格式
         pil_full_map = Image.fromarray(cv2.cvtColor(self.logic_map_bgr, cv2.COLOR_BGR2RGB))
         # 打开新窗口
-        BigMapWindow(self.root, pil_full_map, self.marker_data, self.icon_cache)
+        BigMapWindow(self.root, pil_full_map, self.marker_data, self.icon_cache, self.resource_type_selected_items)
 
     def on_window_configure(self, event):
         # 标记正在拖动
@@ -1010,6 +1204,59 @@ class MapTrackerApp:
 
         log_step(f">>> 已从缓存加载 {len(keypoints)} 个特征点")
         return keypoints, descriptors
+
+    def resource_type_toggle_popup(self):
+        if self.resource_type_popup and self.resource_type_popup.winfo_exists():
+            self.resource_type_close_popup()
+            return
+
+            # 创建一个无边框的置顶窗口
+        self.resource_type_popup = tk.Toplevel(self.root)
+        self.resource_type_popup.overrideredirect(True)  # 去掉标题栏
+        self.resource_type_popup.attributes("-topmost", True)  # 确保下拉框也在最前面
+
+        # 计算弹出位置（在按钮正下方）
+        x = self.resource_type_button.winfo_rootx()
+        y = self.resource_type_button.winfo_rooty() - 10 # 向上弹出，因为按钮在底部
+        self.resource_type_popup.geometry(f"+{x}+{y}")
+
+        # 绑定点击外部自动关闭
+        self.resource_type_popup.bind("<FocusOut>", lambda e: self.resource_type_close_popup())
+
+        # 创建容器并加滚动条
+        frame = tk.Frame(self.resource_type_popup, bg="white", highlightbackground="gray", highlightthickness=1)
+        frame.pack()
+
+        for option in self.resource_type_options:
+            if option not in self.resource_type_vars:
+                self.resource_type_vars[option] = tk.BooleanVar(value=option in self.resource_type_selected_items)
+
+            cb = tk.Checkbutton(frame, text=option, variable=self.resource_type_vars[option],
+                                bg="white", anchor="w", padx=10,
+                                command=self.resource_type_update_selection)
+            cb.pack(fill="x")
+
+        self.resource_type_popup.focus_set()
+
+    def resource_type_update_selection(self):
+        self.resource_type_selected_items = [opt for opt, var in self.resource_type_vars.items() if var.get()]
+        if not self.resource_type_selected_items:
+            self.resource_type_button.config(text="请选择")
+        else:
+            text = ", ".join(self.resource_type_selected_items)
+            # 如果太长，显示数量
+            if len(text) > 20:
+                text = f"已选择 {len(self.resource_type_selected_items)} 项"
+            self.resource_type_button.config(text=text)
+
+    def resource_type_close_popup(self):
+        if self.resource_type_popup:
+            self.resource_type_popup.destroy()
+            self.resource_type_popup = None
+
+    def resource_type_get_value(self):
+        """获取选中的列表"""
+        return self.resource_type_selected_items
 
 class MinimapSelector(tk.Toplevel):
     def __init__(self, master):
@@ -1182,6 +1429,10 @@ def run_bootstrapper(force_selector=True):
     root.deiconify()  # 重新显示主窗口
     app = MapTrackerApp(root)
     root.mainloop()
+
+class ResourceDownload:
+    def __init__(self):
+        self.url_point = f"https://wiki.biligame.com/rocom/Data:Mapnew/point.json"
 
 
 
