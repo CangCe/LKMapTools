@@ -1,10 +1,10 @@
 {
     "DEBUGMODE": false,
     "MINIMAP": {
-        "top": 292,
-        "left": 1853,
-        "width": 150,
-        "height": 150
+        "top": 206,
+        "left": 2046,
+        "width": 160,
+        "height": 160
     },
     "WINDOW_GEOMETRY": "400x550+1500+100",
     "VIEW_SIZE": 400,

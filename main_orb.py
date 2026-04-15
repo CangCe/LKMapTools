@@ -1,10 +1,13 @@
 import json
 import threading
 import queue
+import traceback
+
 import cv2
 import numpy as np
 import mss
 import tkinter as tk
+from tkinter import messagebox
 from PIL import Image, ImageTk, ImageDraw
 import time
 import config  # <--- 导入同目录下的配置文件
@@ -15,6 +18,8 @@ import sys
 
 DEBUG_MODE = config.DEBUGMODE
 MIN_MATCH_COUNT = config.ORB_MIN_MATCH_COUNT  # 增加最小匹配数要求
+CONFIG_FILE = "config.json"
+selector_event = threading.Event()
 
 def super_enhance(image, isPlayer=False):
     # # 转为灰度
@@ -34,45 +39,6 @@ def super_enhance(image, isPlayer=False):
     # clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
     # return clahe.apply(enhanced)
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-def run_selector_if_needed(force=False):
-    """
-    检查是否需要运行小地图校准工具。
-    :param force: 如果为 True，无视配置强制重新校准
-    """
-    # 检查 config.json 中是否已经有了合法的坐标
-    minimap_cfg = config.settings.get("MINIMAP", {})
-    has_valid_config = minimap_cfg and "top" in minimap_cfg and "left" in minimap_cfg
-
-    if not has_valid_config or force:
-        print("未检测到有效的小地图坐标，或请求重新校准。")
-        print(">>> 正在启动小地图选择器...")
-
-        # 兼容打包后的 .exe 运行路径
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-            selector_path = os.path.join(base_dir, "MinimapSetup.exe")  # 假设你把 selector 打包成了这个名字
-            command = [selector_path]
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            selector_path = os.path.join(base_dir, "selector.py")
-            command = [sys.executable, selector_path]
-
-        try:
-            # 阻塞运行：等待 selector 窗口关闭后，才会继续执行下面的代码
-            subprocess.run(command, check=True)
-            print("<<< 选择器关闭，坐标已更新！")
-
-            # 重要：因为配置文件被 selector 修改了，我们需要重新加载一次 config 模块的数据
-            import importlib
-            importlib.reload(config)
-
-        except FileNotFoundError:
-            print(f"❌ 严重错误：找不到小地图选择器工具！期望路径：{selector_path}")
-            print("请手动修改 config.json 或确保选择器工具存在。")
-            sys.exit(1)  # 如果连选择器都没有，且没有配置，只能退出程序
-        except subprocess.CalledProcessError:
-            print("⚠️ 选择器异常退出，可能未保存坐标。")
 
 class BigMapWindow(tk.Toplevel):
     def __init__(self, master, map_img, markers, icon_cache):
@@ -103,7 +69,7 @@ class BigMapWindow(tk.Toplevel):
 
     def bake_static_map(self):
         """将所有图标预先绘制到大图上，生成一个静态图层"""
-        print("正在预渲染大地图图标...")
+        log_step("正在预渲染大地图图标...")
         # 拷贝一份原图，避免破坏原始数据
         working_img = self.original_img.copy()
 
@@ -123,7 +89,7 @@ class BigMapWindow(tk.Toplevel):
             # 粘贴图标（使用图标自身的 alpha 通道作为 mask）
             working_img.paste(icon, paste_pos, icon)
 
-        print("预渲染完成。")
+        log_step("预渲染完成。")
         return working_img
 
     def render(self):
@@ -187,6 +153,7 @@ class BigMapWindow(tk.Toplevel):
 
 class MapTrackerApp:
     def __init__(self, root):
+        log_step("正在尝试建立主root")
         self.root = root
         self.root.title("ORB算法小地图定位工具")
 
@@ -194,79 +161,15 @@ class MapTrackerApp:
         self.root.attributes("-topmost", True)
         # --- 使用配置文件中的悬浮窗几何设置 ---
         self.root.geometry(config.WINDOW_GEOMETRY)
-
-        # --- 状态记忆初始化 (惯性导航兜底) ---
-        self.last_x = None
-        self.last_y = None
-        self.lost_frames = 0
-        # --- 使用配置文件中的最大丢失帧数 ---
-        self.MAX_LOST_FRAMES = config.MAX_LOST_FRAMES
-
-        # --- 加载地图文件 ---
-        print(f"正在加载地图 ({config.ORB_MAP_PATH})，请稍候...")
-        self.logic_map_bgr = cv2.imread(config.ORB_MAP_PATH)
-        print(f"正在加载地图 ({config.ORB_MAP_NOEDGE_PATH})，请稍候...")
-        self.noedge_map_bgr = cv2.imread(config.ORB_MAP_NOEDGE_PATH)
-        if self.logic_map_bgr is None or self.noedge_map_bgr is None:
-            raise FileNotFoundError(f"找不到地图文件: {config.ORB_MAP_PATH}，请检查路径！")
-        self.map_height, self.map_width = self.logic_map_bgr.shape[:2]
-
-        self.enhanced_img = super_enhance(self.noedge_map_bgr)
-
-        # --- 初始化 ORB 算法 ---
-        print("正在提取地图的全局特征点...")
-        # 注意：大地图需要非常多的特征点，保留上限。你可以根据实际地图大小调整 50000。
-        self.orb = cv2.ORB_create(
-            nfeatures=config.ORB_NFEATURES,
-            scaleFactor=config.ORB_SCALEFACTOR,
-            nlevels=config.ORB_NLEVELS,
-            edgeThreshold=config.ORB_EDGETHRESHOLD,
-            fastThreshold=config.ORB_FASTTHRESHOLD,
-            firstLevel=0
-        )
-        self.orb_mini = cv2.ORB_create(
-            nfeatures=config.ORB_MINI_NFEATURES,
-            fastThreshold=2,
-            edgeThreshold=1
-        )
-
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) #BF初始化
-
-        self.clahe = cv2.createCLAHE(
-            clipLimit=getattr(config, 'ORB_CLAHE_LIMIT', config.ORB_CLIPLIMIT),
-            tileGridSize=(8, 8)
-        )
-
-        # 构建多分辨率特征池
-        print("正在构建多分辨率特征池 (多尺度预加载)...")
-        self.init_big_map_features()
-
-        # 预先提取大地图所有特征点的坐标数组 (避免每帧重新生成)
-        self.pts_big_np = np.array([k.pt for k in self.kp_big], dtype=np.float32)
-
-        # 调试用输出处理图片
-        if DEBUG_MODE:
-            cv2.imwrite("debug_big_map_features.png", self.logic_map_bgr)
-            test_map = cv2.drawKeypoints(self.enhanced_img, self.kp_big, None, color=(0, 255, 0))
-            cv2.imwrite("debug_big_map_enhanced.png", test_map)
-            print(f"大地图特征点总数: {len(self.kp_big)}")
-
-        # 加载资源点位数据
-        self.marker_data = self.load_markers(config.POINTS_PATH)
-        # 加载图标并缓存（包含灰色版本）
-        self.icon_cache = self.prep_icons(r"assest/icons")
-
-        # 屏幕截图设置 (MSS)
-        self.sct = mss.mss()
         # --- 使用配置文件中的截图区域
         self.minimap_region = config.MINIMAP
-        # --- 预先生成小地图的掩模 (Mask)
-        mask_h = config.MINIMAP.get("height", 256)  # 替换为你的真实高度
-        mask_w = config.MINIMAP.get("width", 256)  # 替换为你的真实宽度
-        self.minimap_mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
-        cv2.circle(self.minimap_mask, (mask_w // 2, mask_h // 2), (mask_w // 2) - 5, 255, -1)
-        # --- 预先定义小地图的中心点坐标 (用于后面的透视变换计算)
-        self.mini_center_pt = np.float32([[[mask_w / 2, mask_h / 2]]])
+        self.last_pos = None
+
+        # --- UI初始化 ---
+        log_step("正在初始化UI")
+        self.status_label = tk.Label(root, text="软件加载，请稍候...", fg="white", bg="black")
+        self.status_label.pack()
+        self.root.after(100, self.ui_delayed_init)
 
         # UI 组件
         # --- 使用配置文件中的悬浮窗视野大小 (VIEW_SIZE)
@@ -306,7 +209,7 @@ class MapTrackerApp:
         self.auto_collect_var = tk.BooleanVar(value=False)
         self.auto_collect_cb = tk.Checkbutton(
             root,
-            text="开启自动采集",
+            text="开启图标自动标记",
             variable=self.auto_collect_var,
             bg='#2b2b2b',
             fg='white',
@@ -354,6 +257,105 @@ class MapTrackerApp:
         self.root.bind("<Configure>", self.on_window_configure)
 
         self.update_tracker()
+    def ui_delayed_init(self):
+        # --- 状态记忆初始化 (惯性导航兜底) ---
+        self.last_x = None
+        self.last_y = None
+        self.lost_frames = 0
+        # --- 使用配置文件中的最大丢失帧数 ---
+        self.MAX_LOST_FRAMES = config.MAX_LOST_FRAMES
+
+        # --- 加载地图文件 ---
+        log_step(f"正在加载地图 ({config.ORB_MAP_PATH})，请稍候...")
+        self.logic_map_bgr = cv2.imread(config.ORB_MAP_PATH)
+        log_step(f"正在加载地图 ({config.ORB_MAP_NOEDGE_PATH})，请稍候...")
+        self.noedge_map_bgr = cv2.imread(config.ORB_MAP_NOEDGE_PATH)
+        if self.logic_map_bgr is None or self.noedge_map_bgr is None:
+            raise FileNotFoundError(f"找不到地图文件: {config.ORB_MAP_PATH}，请检查路径！")
+        self.map_height, self.map_width = self.logic_map_bgr.shape[:2]
+
+        self.enhanced_img = super_enhance(self.noedge_map_bgr)
+
+        # --- 初始化 ORB 算法 ---
+        log_step("正在提取地图的全局特征点...")
+        # 注意：大地图需要非常多的特征点，保留上限。你可以根据实际地图大小调整 50000。
+        self.orb = cv2.ORB_create(
+            nfeatures=config.ORB_NFEATURES,
+            scaleFactor=config.ORB_SCALEFACTOR,
+            nlevels=config.ORB_NLEVELS,
+            edgeThreshold=config.ORB_EDGETHRESHOLD,
+            fastThreshold=config.ORB_FASTTHRESHOLD,
+            firstLevel=0
+        )
+        self.orb_mini = cv2.ORB_create(
+            nfeatures=config.ORB_MINI_NFEATURES,
+            fastThreshold=2,
+            edgeThreshold=1
+        )
+
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)  # BF初始化
+
+        self.clahe = cv2.createCLAHE(
+            clipLimit=getattr(config, 'ORB_CLAHE_LIMIT', config.ORB_CLIPLIMIT),
+            tileGridSize=(8, 8)
+        )
+
+        # 构建多分辨率特征池
+        log_step("正在构建多分辨率特征池 (多尺度预加载)...")
+        self.init_big_map_features()
+
+        # 预先提取大地图所有特征点的坐标数组 (避免每帧重新生成)
+        self.pts_big_np = np.array([k.pt for k in self.kp_big], dtype=np.float32)
+
+        # 调试用输出处理图片
+        if DEBUG_MODE:
+            cv2.imwrite("debug_big_map_features.png", self.logic_map_bgr)
+            test_map = cv2.drawKeypoints(self.enhanced_img, self.kp_big, None, color=(0, 255, 0))
+            cv2.imwrite("debug_big_map_enhanced.png", test_map)
+            log_step(f"大地图特征点总数: {len(self.kp_big)}")
+
+        # 加载资源点位数据
+        self.marker_data = self.load_markers(config.POINTS_PATH)
+        # 加载图标并缓存（包含灰色版本）
+        self.icon_cache = self.prep_icons(r"assest/icons")
+
+        # 屏幕截图设置 (MSS)
+        self.sct = mss.mss()
+        # --- 预先生成小地图的掩模 (Mask)
+        mask_h = config.MINIMAP.get("height", 256)  # 替换为你的真实高度
+        mask_w = config.MINIMAP.get("width", 256)  # 替换为你的真实宽度
+        self.minimap_mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
+        cv2.circle(self.minimap_mask, (mask_w // 2, mask_h // 2), (mask_w // 2) - 5, 255, -1)
+        # --- 预先定义小地图的中心点坐标 (用于后面的透视变换计算)
+        self.mini_center_pt = np.float32([[[mask_w / 2, mask_h / 2]]])
+        self.status_label.destroy()
+
+    def run_selector_if_needed(self,force=False):
+        """
+        检查是否需要运行小地图校准工具。
+        :param force: 如果为 True，无视配置强制重新校准
+        """
+        # 检查 config.json 中是否已经有了合法的坐标
+        minimap_cfg = config.MINIMAP
+        log_step(f"尝试加载minimap_cfg：{minimap_cfg}")
+        has_valid_config = (
+                'top' in minimap_cfg and
+                'left' in minimap_cfg and
+                'width' in minimap_cfg and
+                'height' in minimap_cfg
+        )
+
+        if not has_valid_config or force:
+            log_step("未检测到有效的小地图坐标，或请求重新校准。")
+            try:
+                # 等待 selector 窗口关闭后，才会继续执行下面的代码
+                log_step(">>> 正在启动小地图选择器...")
+                MinimapSelector(self.root)
+                log_step("<<< 选择器关闭，坐标已更新！")
+                return
+            except Exception as e:
+                log_step(f"小地图选择器发生错误：{e}")
+                sys.exit(1)  # 如果连选择器都没有，且没有配置，只能退出程序
 
     def update_tracker(self):
         found = False
@@ -402,7 +404,7 @@ class MapTrackerApp:
                                 m['is_collected'] = True
                                 need_save = True
                                 if DEBUG_MODE:
-                                    print(f"DEBUG: 自动采集资源点 {m['id']} (类型: {m['type']})")
+                                    log_step(f"DEBUG: 自动采集资源点 {m['id']} (类型: {m['type']})")
 
                         # 相对坐标换算
                         rx, ry = int(m['pixel_x'] - x1), int(m['pixel_y'] - y1)
@@ -471,7 +473,7 @@ class MapTrackerApp:
         all_des = []
 
         for s in scales:
-            print(f"  -> 正在提取 {s}x 缩放层级的特征...")
+            log_step(f"  -> 正在提取 {s}x 缩放层级的特征...")
             if s == 1.0:
                 layer_gray = logic_gray_raw
             else:
@@ -499,7 +501,7 @@ class MapTrackerApp:
         self.kp_big = all_kp
         self.des_big = np.vstack(all_des)
 
-        print(f"特征池构建完成，总计特征点: {len(self.kp_big)}")
+        log_step(f"特征池构建完成，总计特征点: {len(self.kp_big)}")
 
     def extract_grid_features(self, image_gray, total_features=100000, grid_rows=30, grid_cols=30):
         """
@@ -619,9 +621,9 @@ class MapTrackerApp:
                         'pixel_y': py,
                         'is_collected': m_id in collected_ids  # 初始状态
                     })
-            print(f"成功加载 {len(processed_markers)} 个资源点")
+            log_step(f"成功加载 {len(processed_markers)} 个资源点")
         except Exception as e:
-            print(f"加载点位失败: {e}")
+            log_step(f"加载点位失败: {e}")
 
         return processed_markers
 
@@ -629,7 +631,7 @@ class MapTrackerApp:
         """预加载图标并生成灰度版本"""
         cache = {}
         if not os.path.exists(icon_dir):
-            print(f"警告: 找不到图标目录 {icon_dir}")
+            log_step(f"警告: 找不到图标目录 {icon_dir}")
             return cache
 
         for fname in os.listdir(icon_dir):
@@ -654,13 +656,16 @@ class MapTrackerApp:
 
                     cache[m_type] = {"normal": img, "gray": gray_img}
                 except Exception as e:
-                    print(f"图标 {fname} 加载失败: {e}")
+                    log_step(f"图标 {fname} 加载失败: {e}")
         return cache
 
     def capture_loop(self):
         """专门负责截屏的生产者线程"""
         with mss.mss() as sct:
             while self.is_running:
+                if not hasattr(self, 'minimap_region') or self.minimap_region is None:
+                    time.sleep(0.1)
+                    continue
                 try:
                     # 1. 截图
                     screenshot = sct.grab(self.minimap_region)
@@ -683,12 +688,15 @@ class MapTrackerApp:
                     time.sleep(0.033)
 
                 except Exception as e:
-                    print(f"截图线程发生错误: {e}")
+                    log_step(f"截图线程发生错误: {e}")
                     time.sleep(1)
 
     def match_loop(self):
         """专门负责计算的消费者线程 - 读写分离版"""
         while self.is_running:
+            if not hasattr(self, 'orb_mini') or not hasattr(self, 'kp_big'):
+                time.sleep(0.5)
+                continue
             try:
                 # 1. 从队列获取最新帧 (如果队列为空，会在这里阻塞等待，不占 CPU)
                 # 设置 timeout 防止线程死锁无法退出
@@ -708,7 +716,7 @@ class MapTrackerApp:
                     # --- 坐标系划分 ---
                     if is_global_mode:
                         if self.last_x is not None:
-                            print("定位丢失：重置参考坐标并开启全图扫描...")
+                            log_step("定位丢失：重置参考坐标并开启全图扫描...")
                             self.last_x = None
                         current_des_big = self.des_big
                         current_kp_big = self.kp_big
@@ -754,7 +762,7 @@ class MapTrackerApp:
                                         # 假设玩家 0.1 秒内不可能跑过 100 像素
                                         if dist > 200:
                                             self.consecutive_failures += 1
-                                            print("-》匹配结果跳变异常，放弃更新")
+                                            log_step("-》匹配结果跳变异常，放弃更新")
                                             continue
 
                                 if (0 <= raw_x <= self.map_width) and (0 <= raw_y <= self.map_height):
@@ -764,7 +772,7 @@ class MapTrackerApp:
                                     self.found = True
 
                             elif DEBUG_MODE:
-                                print("->匹配结果缩放异常，放弃更新")
+                                log_step("->匹配结果缩放异常，放弃更新")
                     else:
                         self.consecutive_failures += 1
                         self.found = False
@@ -777,7 +785,7 @@ class MapTrackerApp:
                 # 只要 capture_loop 限制了 30FPS，match_loop 最多也就跑 30 次。
 
             except Exception as e:
-                print(f"匹配线程发生错误: {e}")
+                log_step(f"匹配线程发生错误: {e}")
                 time.sleep(1)
 
     def reset_location(self):
@@ -795,7 +803,7 @@ class MapTrackerApp:
         self.consecutive_failures = self.global_search_threshold
         self.found = False
 
-        print(">>> 已手动重置定位系统，正在尝试全图重新定位...")
+        log_step(">>> 已手动重置定位系统，正在尝试全图重新定位...")
 
     def open_big_map(self):
         # 确保 logic_map_bgr 已经转为 PIL 格式
@@ -807,7 +815,7 @@ class MapTrackerApp:
         # 标记正在拖动
         self.is_dragging = True
         if DEBUG_MODE:
-            print(">>> 窗口移动，暂停工作逻辑")
+            log_step(">>> 窗口移动，暂停工作逻辑")
 
         # 如果已有计时器，取消它
         if self.drag_timer:
@@ -820,11 +828,10 @@ class MapTrackerApp:
         self.is_dragging = False
         self.drag_timer = None
         if DEBUG_MODE:
-            print(">>> 窗口停止移动，恢复工作逻辑")
+            log_step(">>> 窗口停止移动，恢复工作逻辑")
 
     def reset_picking_data(self):
         """重置所有已采集标记"""
-        from tkinter import messagebox
 
         # 弹出二次确认弹窗，防止误操作
         if not messagebox.askyesno("确认重置", "确定要清空所有已采集记录吗？此操作不可撤销。"):
@@ -843,7 +850,7 @@ class MapTrackerApp:
                 with open(config.PICKINGDATA_PATH, 'w', encoding='utf-8') as f:
                     json.dump([], f)  # 写入空列表
 
-            print(">>> 已成功重置所有采集标记。")
+            log_step(">>> 已成功重置所有采集标记。")
 
             # 4. 强制刷新一次 UI (如果有打开大地图，建议关闭大地图重开)
             # 这里主循环 update_tracker 会在下一帧自动应用这些改变
@@ -862,10 +869,10 @@ class MapTrackerApp:
                 self.pts_big_np = np.array([k.pt for k in self.kp_big], dtype=np.float32)
                 return
             except Exception as e:
-                print(f"缓存读取失败，重新计算中... {e}")
+                log_step(f"缓存读取失败，重新计算中... {e}")
 
         # 如果缓存不存在，则正常计算
-        print("正在初次计算大地图特征点，请稍候...")
+        log_step("正在初次计算大地图特征点，请稍候...")
         self.build_multi_scale_feature_pool()
 
         # 计算完成后存入缓存
@@ -881,7 +888,7 @@ class MapTrackerApp:
 
         # 使用 savez_compressed 进行高比例压缩保存
         np.savez_compressed(file_path, keypoints=kp_array, descriptors=descriptors)
-        print(f">>> 特征数据已缓存至: {file_path}")
+        log_step(f">>> 特征数据已缓存至: {file_path}")
 
     def load_features(self,file_path):
         """从磁盘读取并还原特征点和描述符"""
@@ -894,16 +901,208 @@ class MapTrackerApp:
                                   response=row['response'], octave=row['octave'], class_id=row['class_id'])
                      for row in kp_array]
 
-        print(f">>> 已从缓存加载 {len(keypoints)} 个特征点")
+        log_step(f">>> 已从缓存加载 {len(keypoints)} 个特征点")
         return keypoints, descriptors
+
+class MinimapSelector(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("小地图校准器")
+
+        # --- 窗口样式设置 ---
+        self.overrideredirect(True)  # 去除系统窗口边框
+        self.attributes("-topmost", True)  # 永远置顶
+        self.attributes("-alpha", 0.5)  # 设置整体半透明(50%)，方便看透下方的游戏
+        self.configure(bg='black')  # 背景纯黑
+
+        # --- 初始化状态 ---
+        self.size = 150
+        self.x = 100
+        self.y = 100
+
+        # 从现有配置文件中读取上一次的位置
+        self.load_initial_pos()
+
+        # 设置初始位置和大小
+        self.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
+
+        # --- 创建画布 ---
+        self.canvas = tk.Canvas(self, bg='black', highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.draw_ui()
+
+        # --- 绑定鼠标与键盘事件 ---
+        self.canvas.bind("<ButtonPress-1>", self.on_press)  # 鼠标左键按下
+        self.canvas.bind("<B1-Motion>", self.on_drag)  # 鼠标左键按住拖动
+
+        # 绑定鼠标滚轮 (Windows)
+        self.bind("<MouseWheel>", self.on_scroll)
+        # 绑定鼠标滚轮 (Linux/Mac 兼容)
+        self.bind("<Button-4>", lambda e: self.resize(10))
+        self.bind("<Button-5>", lambda e: self.resize(-10))
+
+        # 绑定回车键和双击保存
+        self.bind("<Return>", self.save_and_exit)
+        self.bind("<Double-Button-1>", self.save_and_exit)
+        # 按 ESC 退出不保存
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        log_step("等待用户选择小地图位置")
+
+    def load_initial_pos(self):
+        """尝试从 config.json 读取上次保存的坐标"""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                minimap = config.MINIMAP
+                if minimap:
+                    self.x = minimap.get("left", 100)
+                    self.y = minimap.get("top", 100)
+                    self.size = minimap.get("width", 150)
+            except Exception:
+                log_step(f"小地图框选器发生错误：{e}")
+
+    def draw_ui(self):
+        """绘制界面元素 (圆形准星和提示文字)"""
+        self.canvas.delete("all")
+        w = 3  # 边框厚度
+
+        # 1. 绘制表示小地图边界的绿色圆圈
+        self.canvas.create_oval(w, w, self.size - w, self.size - w, outline="#00FF00", width=w)
+
+        # 2. 绘制十字准星中心辅助线
+        self.canvas.create_line(0, self.size // 2, self.size, self.size // 2, fill="#00FF00", dash=(4, 4))
+        self.canvas.create_line(self.size // 2, 0, self.size // 2, self.size, fill="#00FF00", dash=(4, 4))
+
+        # 3. 绘制操作提示文字
+        self.canvas.create_text(self.size // 2, 15, text="左键拖动 | 滚轮缩放\n圆框一定要比小地图的框要小", fill="white",
+                                font=("Microsoft YaHei", 9, "bold"))
+        self.canvas.create_text(self.size // 2, self.size - 15, text="按 回车/双击 保存", fill="yellow",
+                                font=("Microsoft YaHei", 9, "bold"))
+
+    def on_press(self, event):
+        """记录鼠标按下的起始位置"""
+        self.start_x = event.x
+        self.start_y = event.y
+
+    def on_drag(self, event):
+        """计算鼠标拖动的偏移量并移动窗口"""
+        dx = event.x - self.start_x
+        dy = event.y - self.start_y
+        self.x += dx
+        self.y += dy
+        self.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
+
+    def on_scroll(self, event):
+        """处理鼠标滚轮放大缩小"""
+        # Windows 的 delta 通常是 120 的倍数
+        if event.delta > 0:
+            self.resize(10)  # 向上滚放大
+        else:
+            self.resize(-10)  # 向下滚缩小
+
+    def resize(self, delta):
+        """改变窗口尺寸"""
+        self.size += delta
+        if self.size < 80:
+            self.size = 80  # 限制最小不能低于 80 像素
+
+        self.geometry(f"{self.size}x{self.size}+{self.x}+{self.y}")
+        self.draw_ui()
+
+    def save_and_exit(self, event=None):
+        """将当前坐标写入 config.json 并退出"""
+        config_data = {}
+        if os.path.exists(CONFIG_FILE):
+            for try_count in range(1,4):
+                try:
+                    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config_data = json.load(f)
+                except Exception as e:
+                    log_step(f"重试次数{try_count}次,写入config时发生错误：{e}")
+                    time.sleep(0.5)
+
+        # 更新 JSON 字典中的 MINIMAP 节点
+        config_data["MINIMAP"] = {
+            "top": self.y,
+            "left": self.x,
+            "width": self.size,
+            "height": self.size
+        }
+
+        # 写回文件
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+        log_step(f"✅ 小地图区域已成功保存: top={self.y}, left={self.x}, size={self.size}")
+        self.destroy()
+
+def log_step(step_name):
+    step_info = f"[{time.strftime('%H:%M:%S')}] {step_name}\n"
+    print(step_info)
+    with open("log.txt", "a", encoding="utf-8") as f:
+        f.write(step_info)
+
+def run_bootstrapper(force_selector=True):
+    root = tk.Tk()
+    root.withdraw()
+
+    # 检查配置是否存在
+    log_step("正在检测是否需要小地图选择器")
+    needs_selector = not config.MINIMAP or force_selector
+    if needs_selector:
+        log_step("正在创建选择器UI")
+        # 2. 创建一个临时的 Toplevel 运行选择器
+        selector_app = MinimapSelector(root)
+
+        # --- 核心：阻塞逻辑 ---
+        # 告诉 Tkinter，在这里停住，直到 selector_win 被销毁
+        root.wait_window(selector_app)
+
+        log_step("选择器检查完成")
+
+        # 再次检查配置，如果用户直接关了没保存，就退出
+        if not os.path.exists(CONFIG_FILE):
+            messagebox.showwarning("提示", "未完成校准，程序将退出。")
+            root.destroy()
+            sys.exit()
+
+    # 因为配置文件被 selector 修改了，我们需要重新加载一次 config 模块的数据
+    import importlib
+    importlib.reload(config)
+
+    log_step("显示主窗口")
+    root.deiconify()  # 重新显示主窗口
+    app = MapTrackerApp(root)
+    root.mainloop()
 
 
 
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
+    log_step("程序启动")
+    try:
+        run_bootstrapper(force_selector=True)
+    except Exception as e:
+        # 捕捉所有导致程序崩溃的致命错误
+        error_msg = traceback.format_exc()
 
-    run_selector_if_needed(force=True)
-    root = tk.Tk()
-    app = MapTrackerApp(root)
-    root.mainloop()
+        # 写入本地日志文件
+        try:
+            with open("crash_log.txt", "w", encoding="utf-8") as f:
+                f.write(error_msg)
+        except:
+            pass  # 如果连写文件的权限都没有，就忽略
+
+        # 弹窗显示错误给用户
+        temp_root = tk.Tk()
+        temp_root.withdraw()  # 隐藏主窗口
+        temp_root.attributes("-topmost", True)
+        log_step(f"程序发生严重错误已停止运行。\n\n错误信息已保存到 crash_log.txt\n\n详情:\n{str(e)}")
+        tk.messagebox.showerror(
+            "程序崩溃",
+            f"程序发生严重错误已停止运行。\n\n错误信息已保存到 crash_log.txt\n\n详情:\n{str(e)}"
+        )
+        temp_root.destroy()
+        sys.exit(1)

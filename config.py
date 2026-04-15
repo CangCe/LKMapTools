@@ -42,22 +42,23 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "DEBUGMODE": False, # 调试模式
-    "MINIMAP": {"top": 292, "left": 1853, "width": 150, "height": 150},
+    "MINIMAP": {},
     "WINDOW_GEOMETRY": "400x550+1500+100",
     "VIEW_SIZE": 400,
     "LOGIC_MAP_PATH": r"assest/raw.png",
     "DISPLAY_MAP_PATH": r"assest/raw.png",
     "MAX_LOST_FRAMES": 50, # 定位最大丢失帧数，不建议修改
-    "MAX_KP_PER_LAYER": 100000, # 强制每层只保留前 N 个最强点
     "POINTS_PATH": r"assest/points.json",
     "PICKINGDATA_PATH": r"assest/picking_data.json",
     "PICKING_RADIUS": 25, # 采集图标变换范围，也就是黄色虚线圈范围
     "ICON_PATH": r"assest/icons",
     "FEATURES_PATH": r"assest/ORB_features.npz",
+    "MAX_KP_PER_LAYER": 100000, # 强制每层只保留前 N 个最强点
 
-    "ORB_MINI_NFEATURES": 2500, # 小地图的锚点匹配数量，越多定位越快但性能消耗越大
-    "ORB_MIN_MATCH_COUNT": 5, # 锚点匹配个数，越多定位越准越慢
     "ORB_NFEATURES": 300000, #锚点总数，因为会切分区块所以此选项只能当比例而不是具体数值
+    "ORB_MINI_NFEATURES": 2500, # 小地图的锚点匹配数量，越多定位越快但性能消耗越大
+    "ORB_GRID":(120,120), # 地图切分区块大小，两个值尽量一致，值越大越容易匹配到锚点
+    "ORB_MIN_MATCH_COUNT": 5, # 锚点匹配个数，越多定位越准越慢
     "ORB_SCALEFACTOR": 1.2, #缩放比例
     "ORB_NLEVELS": 8, #搜索层次，
     "ORB_FASTTHRESHOLD": 5, #阈值差异
@@ -68,8 +69,7 @@ DEFAULT_CONFIG = {
     "ORB_RATIO":0.75, # 阈值通常需要调高一点，比如 0.75 到 0.8，值越小定位越准越慢
     "ORB_RANSAC_THRESHOLD":5.0,
     "ORB_REFRESH_RATE": 20,
-    "ORB_CLAHE_LIMIT": 3.0,
-    "ORB_GRID":(120,120) # 地图切分区块大小，两个值尽量一致，值越大越容易匹配到锚点
+    "ORB_CLAHE_LIMIT": 3.0
 }
 
 
