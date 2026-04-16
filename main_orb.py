@@ -262,6 +262,7 @@ class MapTrackerApp:
 
         # UI 组件
         # --- 使用配置文件中的悬浮窗视野大小 (VIEW_SIZE)
+        log_step("尝试加载UI组件")
         self.canvas = tk.Canvas(root, width=config.VIEW_SIZE, height=config.VIEW_SIZE, bg='#2b2b2b')
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.image_on_canvas = None
@@ -324,6 +325,7 @@ class MapTrackerApp:
         self.auto_route_planning_cb.pack(side=tk.BOTTOM, fill=tk.X)
 
         # -- 下拉选择资源类型
+        log_step("正在加载下拉菜单")
         self.resource_type_options = []
         self.resource_type_selected_items = []
         self.resource_type_vars = {}
@@ -335,6 +337,7 @@ class MapTrackerApp:
 
 
         # -- 大地图按钮
+        log_step("正在加载大地图按钮")
         self.big_map_btn = tk.Button(
             root, text="打开大地图预览", command=self.open_big_map,
             bg='#3c3f41', fg='white', pady=5
@@ -343,6 +346,7 @@ class MapTrackerApp:
 
 
         # 多线程初始化
+        log_step("尝试初始化多线程")
         self.frame_queue = queue.Queue(maxsize=1) # 队列初始化
         self.is_running = True
 
@@ -355,10 +359,12 @@ class MapTrackerApp:
 
 
         # 启动截图线程
+        log_step("尝试启动截图线程")
         self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
         self.capture_thread.start()
 
         # 启动匹配线程
+        log_step("尝试启动匹配线程")
         self.match_thread = threading.Thread(target=self.match_loop, daemon=True)
         self.match_thread.start()
 
@@ -380,6 +386,7 @@ class MapTrackerApp:
         # 绑定窗口改变事件
         self.root.bind("<Configure>", self.on_window_configure)
 
+        log_step("尝试启动update_tracker方法")
         self.update_tracker()
 
     def ui_delayed_init(self):
@@ -461,6 +468,7 @@ class MapTrackerApp:
         self.marker_data = self.load_markers(config.POINTS_PATH)
         # 加载图标并缓存（包含灰色版本）
         self.icon_cache = self.prep_icons(r"assest/icons")
+        log_step(f"已加载图标并缓存")
 
         # 屏幕截图设置 (MSS)
         self.sct = mss.mss()
@@ -471,6 +479,7 @@ class MapTrackerApp:
         cv2.circle(self.minimap_mask, (mask_w // 2, mask_h // 2), (mask_w // 2) - 5, 255, -1)
         # --- 预先定义小地图的中心点坐标 (用于后面的透视变换计算)
         self.mini_center_pt = np.float32([[[mask_w / 2, mask_h / 2]]])
+        log_step(f"已获取小地图范围Mask")
 
         self.status_label.destroy()
 
@@ -506,233 +515,235 @@ class MapTrackerApp:
             self.root.after(100, self.update_tracker)
             return
 
-        found = False
-        need_save = False
-        target_x, target_y = self.current_pos
-        if target_x is not None:
-            found = True
+        try:
+            found = False
+            need_save = False
+            target_x, target_y = self.current_pos
+            if target_x is not None:
+                found = True
 
-            # 如果是第一次定位，直接同步
-            if self.smooth_x is None:
-                self.smooth_x, self.smooth_y = float(target_x), float(target_y)
-            else:
-                # 2. 距离检查：如果瞬移距离过大（比如传送了），直接闪现过去，不进行平滑
-                dist_sq = (target_x - self.smooth_x) ** 2 + (target_y - self.smooth_y) ** 2
-                if dist_sq > 500 ** 2:
+                # 如果是第一次定位，直接同步
+                if self.smooth_x is None:
                     self.smooth_x, self.smooth_y = float(target_x), float(target_y)
                 else:
-                    # 3. 指数平滑公式：New = Current + (Target - Current) * Factor
-                    self.smooth_x += (target_x - self.smooth_x) * self.lerp_factor
-                    self.smooth_y += (target_y - self.smooth_y) * self.lerp_factor
+                    # 2. 距离检查：如果瞬移距离过大（比如传送了），直接闪现过去，不进行平滑
+                    dist_sq = (target_x - self.smooth_x) ** 2 + (target_y - self.smooth_y) ** 2
+                    if dist_sq > 500 ** 2:
+                        self.smooth_x, self.smooth_y = float(target_x), float(target_y)
+                    else:
+                        # 3. 指数平滑公式：New = Current + (Target - Current) * Factor
+                        self.smooth_x += (target_x - self.smooth_x) * self.lerp_factor
+                        self.smooth_y += (target_y - self.smooth_y) * self.lerp_factor
 
-        # 使用平滑后的坐标进行后续的裁剪和渲染
-        if self.smooth_x is not None:
-            center_x, center_y = int(self.smooth_x), int(self.smooth_y)
-            if found:
-                # 隐藏提示文字
-                if self.status_text_id:
-                    self.canvas.itemconfig(self.status_text_id, state="hidden")
+            # 使用平滑后的坐标进行后续的裁剪和渲染
+            if self.smooth_x is not None:
+                center_x, center_y = int(self.smooth_x), int(self.smooth_y)
+                if found:
+                    # 隐藏提示文字
+                    if self.status_text_id:
+                        self.canvas.itemconfig(self.status_text_id, state="hidden")
 
-                half_view = config.VIEW_SIZE // 2
-                x1, y1 = center_x - half_view, center_y - half_view
-                x2, y2 = center_x + half_view, center_y + half_view
+                    half_view = config.VIEW_SIZE // 2
+                    x1, y1 = center_x - half_view, center_y - half_view
+                    x2, y2 = center_x + half_view, center_y + half_view
 
-                # 大地地图边缘越界情况处理
-                bg_canvas = np.zeros((config.VIEW_SIZE, config.VIEW_SIZE, 3), dtype=np.uint8)
-                bg_canvas[:] = (43, 43, 43)
+                    # 大地地图边缘越界情况处理
+                    bg_canvas = np.zeros((config.VIEW_SIZE, config.VIEW_SIZE, 3), dtype=np.uint8)
+                    bg_canvas[:] = (43, 43, 43)
 
-                # 计算在原图上截取的合法范围
-                map_x1, map_y1 = max(0, x1), max(0, y1)
-                map_x2, map_y2 = min(self.map_width, x2), min(self.map_height, y2)
+                    # 计算在原图上截取的合法范围
+                    map_x1, map_y1 = max(0, x1), max(0, y1)
+                    map_x2, map_y2 = min(self.map_width, x2), min(self.map_height, y2)
 
-                # 只有当截取范围有效时才进行像素复制
-                if map_x1 < map_x2 and map_y1 < map_y2:
-                    # 计算在固定底板(bg_canvas)上的粘贴范围 (自动处理负坐标导致的偏移量)
-                    paste_x1 = map_x1 - x1
-                    paste_y1 = map_y1 - y1
-                    paste_x2 = paste_x1 + (map_x2 - map_x1)
-                    paste_y2 = paste_y1 + (map_y2 - map_y1)
+                    # 只有当截取范围有效时才进行像素复制
+                    if map_x1 < map_x2 and map_y1 < map_y2:
+                        # 计算在固定底板(bg_canvas)上的粘贴范围 (自动处理负坐标导致的偏移量)
+                        paste_x1 = map_x1 - x1
+                        paste_y1 = map_y1 - y1
+                        paste_x2 = paste_x1 + (map_x2 - map_x1)
+                        paste_y2 = paste_y1 + (map_y2 - map_y1)
 
-                    # 将合法部分的地图贴到底板上，确保坐标系绝对对齐
-                    bg_canvas[paste_y1:paste_y2, paste_x1:paste_x2] = self.logic_map_bgr[map_y1:map_y2, map_x1:map_x2]
+                        # 将合法部分的地图贴到底板上，确保坐标系绝对对齐
+                        bg_canvas[paste_y1:paste_y2, paste_x1:paste_x2] = self.logic_map_bgr[map_y1:map_y2, map_x1:map_x2]
 
-                # 将拼合好的底板转换为图片
-                pil_bg = Image.fromarray(cv2.cvtColor(bg_canvas, cv2.COLOR_BGR2RGB))
-                self.tk_bg_image = ImageTk.PhotoImage(pil_bg)
+                    # 将拼合好的底板转换为图片
+                    pil_bg = Image.fromarray(cv2.cvtColor(bg_canvas, cv2.COLOR_BGR2RGB))
+                    self.tk_bg_image = ImageTk.PhotoImage(pil_bg)
 
-                # # 裁剪底图
-                # display_crop = self.logic_map_bgr[max(0,y1):min(self.map_height,y2),
-                #                                   max(0,x1):min(self.map_width,x2)].copy()
-                # pil_bg = Image.fromarray(cv2.cvtColor(display_crop, cv2.COLOR_BGR2RGB))
-                # self.tk_bg_image = ImageTk.PhotoImage(pil_bg)
+                    # 更新底层背景图片（如果不存在则创建）
+                    if not hasattr(self, 'bg_image_id') or self.bg_image_id is None:
+                        self.bg_image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_bg_image)
+                        self.canvas.tag_lower(self.bg_image_id)  # 确保底图永远在最下层
+                    else:
+                        self.canvas.itemconfig(self.bg_image_id, image=self.tk_bg_image, state="normal")
 
-                # 更新底层背景图片（如果不存在则创建）
-                if not hasattr(self, 'bg_image_id') or self.bg_image_id is None:
-                    self.bg_image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_bg_image)
-                    self.canvas.tag_lower(self.bg_image_id)  # 确保底图永远在最下层
-                else:
-                    self.canvas.itemconfig(self.bg_image_id, image=self.tk_bg_image, state="normal")
+                    # 独立管理图标 (不修改底图像素)
+                    if not hasattr(self, 'canvas_icons'):
+                        self.canvas_icons = {}
 
-                # 独立管理图标 (不修改底图像素)
-                if not hasattr(self, 'canvas_icons'):
-                    self.canvas_icons = {}
+                    # 遍历所有标记，决定移动、显示还是隐藏
+                    for m in self.marker_data:
+                        m_id = m['id']
+                        m_type = m['type']
 
-                # 遍历所有标记，决定移动、显示还是隐藏
-                for m in self.marker_data:
-                    m_id = m['id']
-                    m_type = m['type']
+                        # 安全检测
+                        try:
+                            m_type_int = int(m_type)
+                        except ValueError:
+                            continue  # 如果还是遇到了非数字，安全跳过该点，不要引发系统崩溃
 
-                    # 安全检测
-                    try:
-                        m_type_int = int(m_type)
-                    except ValueError:
-                        continue  # 如果还是遇到了非数字，安全跳过该点，不要引发系统崩溃
+                        # 判断该点位所属的分类是否被选中
+                        is_visible = False
+                        for category_name in self.resource_type_selected_items:
+                            # 获取该分类对应的 ID 范围
+                            range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
+                            if range_min <= m_type_int <= range_max:
+                                is_visible = True
+                                break
 
-                    # 判断该点位所属的分类是否被选中
-                    is_visible = False
-                    for category_name in self.resource_type_selected_items:
-                        # 获取该分类对应的 ID 范围
-                        range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
-                        if range_min <= m_type_int <= range_max:
-                            is_visible = True
-                            break
-
-                    # 如果没被选中，直接隐藏并跳过
-                    if not is_visible:
-                        if m_id in self.canvas_icons:
-                            self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
-                        continue
-
-                    # 视锥剔除与距离计算
-                    if x1 <= m['pixel_x'] <= x2 and y1 <= m['pixel_y'] <= y2:
-                        dist = ((m['pixel_x'] - center_x)**2 + (m['pixel_y'] - center_y)**2)**0.5
-
-                        if dist > 250:
-                            # 距离过远，如果在画布上则隐藏
+                        # 如果没被选中，直接隐藏并跳过
+                        if not is_visible:
                             if m_id in self.canvas_icons:
                                 self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
                             continue
 
-                        # 自动采集逻辑
-                        if self.auto_collect_var.get() and dist < config.PICKING_RADIUS and not m['is_collected']:
-                            m['is_collected'] = True
-                            need_save = True
-                            if DEBUG_MODE:
-                                log_step(f"DEBUG: 自动采集资源点 {m['id']} (类型: {m['type']})")
+                        # 视锥剔除与距离计算
+                        if x1 <= m['pixel_x'] <= x2 and y1 <= m['pixel_y'] <= y2:
+                            dist = ((m['pixel_x'] - center_x)**2 + (m['pixel_y'] - center_y)**2)**0.5
 
-                        # 计算在 Canvas 上的相对坐标
-                        rx, ry = int(m['pixel_x'] - x1), int(m['pixel_y'] - y1)
+                            if dist > 250:
+                                # 距离过远，如果在画布上则隐藏
+                                if m_id in self.canvas_icons:
+                                    self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
+                                continue
 
-                        icon_set = self.icon_cache.get(m['type'])
-                        if not icon_set: continue
+                            # 自动采集逻辑
+                            if self.auto_collect_var.get() and dist < config.PICKING_RADIUS and not m['is_collected']:
+                                m['is_collected'] = True
+                                need_save = True
+                                if DEBUG_MODE:
+                                    log_step(f"DEBUG: 自动采集资源点 {m['id']} (类型: {m['type']})")
 
-                        target_img = icon_set["tk_gray"] if m['is_collected'] else icon_set["tk_normal"]
-
-                        # 如果 Canvas 上还没这个图标，创建它
-                        if m_id not in self.canvas_icons:
-                            item_id = self.canvas.create_image(rx, ry, anchor=tk.CENTER, image=target_img)
-                            self.canvas_icons[m_id] = item_id
-                        else:
-                            # 如果已存在，仅更新位置、图片和状态（恢复显示）
-                            item_id = self.canvas_icons[m_id]
-                            self.canvas.coords(item_id, rx, ry)
-                            self.canvas.itemconfig(item_id, image=target_img, state="normal")
-                    else:
-                        # 视野外，如果有对应的 item 则隐藏
-                        if m_id in self.canvas_icons:
-                            self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
-
-                # 绘制玩家位置圆圈
-                view_w = config.VIEW_SIZE
-                view_h = config.VIEW_SIZE
-                center_x = view_w // 2
-                center_y = view_h // 2
-                radius = 8  # 圆圈半径
-
-                bbox = [center_x - radius, center_y - radius,
-                        center_x + radius, center_y + radius]
-
-                radius_picking = radius + config.PICKING_RADIUS
-                bbox_picking = [center_x - radius_picking, center_y - radius_picking,
-                        center_x + radius_picking, center_y + radius_picking]
-                # 清除渲染堆叠
-                self.canvas.delete("player_indicator")
-                self.canvas.delete("route_line") #旧路线
-
-                # 路线规划绘制逻辑
-                if getattr(self, 'auto_route_planning_var', None) and self.auto_route_planning_var.get() and self.found:
-                    route_markers = self.calculate_collection_route(self.smooth_x, self.smooth_y, num_points=10)
-                    if route_markers:
-                        # 路线的起点是屏幕中心的玩家位置
-                        prev_x, prev_y = center_x, center_y
-
-                        for idx, m in enumerate(route_markers):
-                            # 将大地图绝对坐标转换为 Canvas 相对坐标
+                            # 计算在 Canvas 上的相对坐标
                             rx, ry = int(m['pixel_x'] - x1), int(m['pixel_y'] - y1)
 
-                            # 绘制连线 (带箭头，青色虚线)
-                            self.canvas.create_line(
-                                prev_x, prev_y, rx, ry,
-                                fill="#00FFCC", width=2, dash=(4, 2), arrow=tk.LAST, tags="route_line"
-                            )
-                            # 绘制路线序号文字，增加阴影以保证在复杂底图上的可读性
-                            self.canvas.create_text(
-                                rx + 12, ry - 12,
-                                text=str(idx + 1), fill="black", font=("微软雅黑", 10, "bold"), tags="route_line"
-                            )
-                            self.canvas.create_text(
-                                rx + 11, ry - 13,
-                                text=str(idx + 1), fill="#00FFCC", font=("微软雅黑", 10, "bold"), tags="route_line"
-                            )
+                            icon_set = self.icon_cache.get(m['type'])
+                            if not icon_set: continue
 
-                            # 迭代下一个起点
-                            prev_x, prev_y = rx, ry
+                            target_img = icon_set["tk_gray"] if m['is_collected'] else icon_set["tk_normal"]
 
-                # 采集范围圈
-                self.canvas.create_oval(bbox_picking, outline="yellow",dash=(4,2), width=1, tags="player_indicator")
-                if self.found:
-                    # 定位成功：画红圈
-                    self.canvas.create_oval(bbox, outline="red", width=2, tags="player_indicator")
-                else:
-                    # 定位丢失：画白圈
-                    self.canvas.create_oval(bbox, outline="white", width=2, tags="player_indicator")
-        else:
-            # 隐藏地图底图和所有图标
-            if hasattr(self, 'bg_image_id') and self.bg_image_id:
-                self.canvas.itemconfig(self.bg_image_id, state="hidden")
+                            # 如果 Canvas 上还没这个图标，创建它
+                            if m_id not in self.canvas_icons:
+                                item_id = self.canvas.create_image(rx, ry, anchor=tk.CENTER, image=target_img)
+                                self.canvas_icons[m_id] = item_id
+                            else:
+                                # 如果已存在，仅更新位置、图片和状态（恢复显示）
+                                item_id = self.canvas_icons[m_id]
+                                self.canvas.coords(item_id, rx, ry)
+                                self.canvas.itemconfig(item_id, image=target_img, state="normal")
+                        else:
+                            # 视野外，如果有对应的 item 则隐藏
+                            if m_id in self.canvas_icons:
+                                self.canvas.itemconfig(self.canvas_icons[m_id], state="hidden")
 
-            # 隐藏所有动态图标 (利用 tags 批量操作)
-            self.canvas.itemconfigure("all", state="hidden")
+                    # 绘制玩家位置圆圈
+                    view_w = config.VIEW_SIZE
+                    view_h = config.VIEW_SIZE
+                    center_x = view_w // 2
+                    center_y = view_h // 2
+                    radius = 8  # 圆圈半径
 
-            # 显示或更新提示文字
-            self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！"
-            center_pt = config.VIEW_SIZE // 2
+                    bbox = [center_x - radius, center_y - radius,
+                            center_x + radius, center_y + radius]
 
-            if not self.status_text_id:
-                # 第一次创建：白色文字，带一点点阴影效果（创建两个 text）
-                self.status_text_id = self.canvas.create_text(
-                    center_pt, center_pt,
-                    text=self.empty_display_text,
-                    fill="white",
-                    font=("微软雅黑", 14, "bold"),
-                    justify=tk.CENTER,
-                    tags="status_msg"
-                )
+                    radius_picking = radius + config.PICKING_RADIUS
+                    bbox_picking = [center_x - radius_picking, center_y - radius_picking,
+                            center_x + radius_picking, center_y + radius_picking]
+                    # 清除渲染堆叠
+                    self.canvas.delete("player_indicator")
+                    self.canvas.delete("route_line") #旧路线
 
+                    # 路线规划绘制逻辑
+                    if getattr(self, 'auto_route_planning_var', None) and self.auto_route_planning_var.get() and self.found:
+                        route_markers = self.calculate_collection_route(self.smooth_x, self.smooth_y, num_points=10)
+                        if route_markers:
+                            # 路线的起点是屏幕中心的玩家位置
+                            prev_x, prev_y = center_x, center_y
+
+                            for idx, m in enumerate(route_markers):
+                                # 将大地图绝对坐标转换为 Canvas 相对坐标
+                                rx, ry = int(m['pixel_x'] - x1), int(m['pixel_y'] - y1)
+
+                                # 绘制连线 (带箭头，青色虚线)
+                                self.canvas.create_line(
+                                    prev_x, prev_y, rx, ry,
+                                    fill="#00FFCC", width=2, dash=(4, 2), arrow=tk.LAST, tags="route_line"
+                                )
+                                # 绘制路线序号文字，增加阴影以保证在复杂底图上的可读性
+                                self.canvas.create_text(
+                                    rx + 12, ry - 12,
+                                    text=str(idx + 1), fill="black", font=("微软雅黑", 10, "bold"), tags="route_line"
+                                )
+                                self.canvas.create_text(
+                                    rx + 11, ry - 13,
+                                    text=str(idx + 1), fill="#00FFCC", font=("微软雅黑", 10, "bold"), tags="route_line"
+                                )
+
+                                # 迭代下一个起点
+                                prev_x, prev_y = rx, ry
+
+                    # 采集范围圈
+                    self.canvas.create_oval(bbox_picking, outline="yellow",dash=(4,2), width=1, tags="player_indicator")
+                    if self.found:
+                        # 定位成功：画红圈
+                        self.canvas.create_oval(bbox, outline="red", width=2, tags="player_indicator")
+                    else:
+                        # 定位丢失：画白圈
+                        self.canvas.create_oval(bbox, outline="white", width=2, tags="player_indicator")
             else:
-                self.canvas.itemconfig(self.status_text_id, state="normal", text=self.empty_display_text)
-                self.canvas.tag_raise(self.status_text_id)
+                # 隐藏地图底图和所有图标
+                if hasattr(self, 'bg_image_id') and self.bg_image_id:
+                    self.canvas.itemconfig(self.bg_image_id, state="hidden")
 
-        if need_save and int(time.time() * 10) % 10 == 0:
-            self.save_picking_data(config.PICKINGDATA_PATH)
+                # 隐藏所有动态图标 (利用 tags 批量操作)
+                self.canvas.itemconfigure("all", state="hidden")
 
-        # --- 使用配置文件中的刷新频率 ---
-        if self.is_dragging:
-            # 正在拖动时，只维持 100ms 一次的低频检查，或者直接 return
-            self.root.after(100, self.update_tracker)
-            return
-        else:
-            self.root.after(config.ORB_REFRESH_RATE, self.update_tracker)
+                # 显示或更新提示文字
+                self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！\n建议窗口化运行游戏，全屏可能出现未知bug"
+                center_pt = config.VIEW_SIZE // 2
+
+                if not self.status_text_id:
+                    # 第一次创建：白色文字，带一点点阴影效果（创建两个 text）
+                    self.status_text_id = self.canvas.create_text(
+                        center_pt, center_pt,
+                        text=self.empty_display_text,
+                        fill="white",
+                        font=("微软雅黑", 14, "bold"),
+                        justify=tk.CENTER,
+                        tags="status_msg"
+                    )
+
+                else:
+                    self.canvas.itemconfig(self.status_text_id, state="normal", text=self.empty_display_text)
+                    self.canvas.tag_raise(self.status_text_id)
+
+            if need_save and int(time.time() * 10) % 10 == 0:
+                self.save_picking_data(config.PICKINGDATA_PATH)
+
+
+        except Exception as e:
+            if DEBUG_MODE:
+                log_step(f"UI 刷新线程发生异常: {e}")
+
+
+        finally:
+            # --- 使用配置文件中的刷新频率 ---
+            if self.is_dragging:
+                # 正在拖动时，只维持 100ms 一次的低频检查，或者直接 return
+                self.root.after(100, self.update_tracker)
+                return
+            else:
+                self.root.after(config.ORB_REFRESH_RATE, self.update_tracker)
 
     def build_multi_scale_feature_pool(self):
         """对大地图进行多尺度缩放并提取特征合并"""
@@ -1024,8 +1035,18 @@ class MapTrackerApp:
                     screenshot = sct.grab(self.minimap_region)
                     minimap_bgr = np.array(screenshot)
 
+                    # 如果图片极大面积是纯黑，说明游戏屏蔽了截图或全屏了
+                    if np.mean(minimap_bgr) < 5:
+                        log_step(
+                            "警告: 捕获到的画面几乎为纯黑！请尝试使用【窗口化/无边框】运行游戏，或以管理员身份运行本程序。")
+
                     # 图像增强/灰度化 (把这一步放在截图线程，分担主计算线程的压力)
                     gray = super_enhance(minimap_bgr, isPlayer=False)
+
+                    # 调试用输出处理图片
+                    if DEBUG_MODE:
+                        cv2.imwrite("debug_mini_map_bgr.png", minimap_bgr)
+                        cv2.imwrite("debug_mini_map_enhanced.png", gray)
 
                     # 压入队列，保持最新帧
                     if self.frame_queue.full():
@@ -1174,6 +1195,9 @@ class MapTrackerApp:
                 log_step(f"匹配线程发生错误: {e}")
                 time.sleep(1)
 
+            # 缓解 GIL 锁争夺
+            time.sleep(0.03)
+
     def reset_location(self):
         """手动清空状态，强制进入全局匹配模式"""
         # 清空滤波队列
@@ -1269,7 +1293,7 @@ class MapTrackerApp:
                 return
             except Exception as e:
                 log_step(f"缓存读取失败，重新计算中... {e}")
-        
+
         # 如果缓存不存在，则正常计算
         log_step("正在初次计算大地图特征点，请稍候...")
 
@@ -1541,6 +1565,17 @@ class ResourceDownload:
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
+
+    # 解决 mss 和 Tkinter 坐标错位问题
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
     log_step("程序启动")
 
     if MATCHTYPE not in ["FLANN","BF"]:
