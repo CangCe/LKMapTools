@@ -1,8 +1,8 @@
 {
     "DEBUGMODE": true,
     "MINIMAP": {
-        "top": 84,
-        "left": 1731,
+        "top": 82,
+        "left": 2365,
         "width": 160,
         "height": 160
     },
@@ -14,7 +14,7 @@
     "MAX_KP_PER_LAYER": 100000,
     "POINTS_PATH": "assest/points.json",
     "PICKINGDATA_PATH": "assest/picking_data.json",
-    "PICKING_RADIUS": 25,
+    "PICKING_RADIUS": 30,
     "ICON_PATH": "assest/icons",
     "FEATURES_PATH": "assest/ORB_features.npz",
     "ORB_MINI_NFEATURES": 3000,

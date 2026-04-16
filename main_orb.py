@@ -101,12 +101,17 @@ class BigMapWindow(tk.Toplevel):
             icon_set = self.icon_cache.get(str(m['type']))
             if not icon_set: continue
 
-            m_type = int(m['type'])
+            m_type = m['type']
+            try:
+                m_type_int = int(m_type)
+            except ValueError:
+                continue  # 如果还是遇到了非数字，安全跳过该点，不要引发系统崩溃
+
             is_visible = False
             for category_name in self.resource_type_selected_items:
                 # 获取该分类对应的 ID 范围
                 range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
-                if range_min <= m_type <= range_max:
+                if range_min <= m_type_int <= range_max:
                     is_visible = True
                     break
 
@@ -308,7 +313,7 @@ class MapTrackerApp:
         self.auto_route_planning_var = tk.BooleanVar(value=False)
         self.auto_route_planning_cb = tk.Checkbutton(
             root,
-            text="开启最近路线规划-施工中",
+            text="开启最近路线规划(需开启图标自动标记)",
             variable=self.auto_route_planning_var,
             bg='#2b2b2b',
             fg='white',
@@ -376,6 +381,7 @@ class MapTrackerApp:
         self.root.bind("<Configure>", self.on_window_configure)
 
         self.update_tracker()
+
     def ui_delayed_init(self):
         # --- 状态记忆初始化 (惯性导航兜底) ---
         self.last_x = None
@@ -432,6 +438,7 @@ class MapTrackerApp:
 
         # 构建多分辨率特征池
         log_step("正在构建多分辨率特征池 (多尺度预加载)...")
+
         self.init_big_map_features()
 
         # 预先提取大地图所有特征点的坐标数组 (避免每帧重新生成)
@@ -495,6 +502,10 @@ class MapTrackerApp:
                 sys.exit(1)  # 如果连选择器都没有，且没有配置，只能退出程序
 
     def update_tracker(self):
+        if not hasattr(self, 'marker_data'):
+            self.root.after(100, self.update_tracker)
+            return
+
         found = False
         need_save = False
         target_x, target_y = self.current_pos
@@ -571,12 +582,18 @@ class MapTrackerApp:
                     m_id = m['id']
                     m_type = m['type']
 
+                    # 安全检测
+                    try:
+                        m_type_int = int(m_type)
+                    except ValueError:
+                        continue  # 如果还是遇到了非数字，安全跳过该点，不要引发系统崩溃
+
                     # 判断该点位所属的分类是否被选中
                     is_visible = False
                     for category_name in self.resource_type_selected_items:
                         # 获取该分类对应的 ID 范围
                         range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
-                        if range_min <= int(m_type) <= range_max:
+                        if range_min <= m_type_int <= range_max:
                             is_visible = True
                             break
 
@@ -640,6 +657,36 @@ class MapTrackerApp:
                         center_x + radius_picking, center_y + radius_picking]
                 # 清除渲染堆叠
                 self.canvas.delete("player_indicator")
+                self.canvas.delete("route_line") #旧路线
+
+                # 路线规划绘制逻辑
+                if getattr(self, 'auto_route_planning_var', None) and self.auto_route_planning_var.get() and self.found:
+                    route_markers = self.calculate_collection_route(self.smooth_x, self.smooth_y, num_points=10)
+                    if route_markers:
+                        # 路线的起点是屏幕中心的玩家位置
+                        prev_x, prev_y = center_x, center_y
+
+                        for idx, m in enumerate(route_markers):
+                            # 将大地图绝对坐标转换为 Canvas 相对坐标
+                            rx, ry = int(m['pixel_x'] - x1), int(m['pixel_y'] - y1)
+
+                            # 绘制连线 (带箭头，青色虚线)
+                            self.canvas.create_line(
+                                prev_x, prev_y, rx, ry,
+                                fill="#00FFCC", width=2, dash=(4, 2), arrow=tk.LAST, tags="route_line"
+                            )
+                            # 绘制路线序号文字，增加阴影以保证在复杂底图上的可读性
+                            self.canvas.create_text(
+                                rx + 12, ry - 12,
+                                text=str(idx + 1), fill="black", font=("微软雅黑", 10, "bold"), tags="route_line"
+                            )
+                            self.canvas.create_text(
+                                rx + 11, ry - 13,
+                                text=str(idx + 1), fill="#00FFCC", font=("微软雅黑", 10, "bold"), tags="route_line"
+                            )
+
+                            # 迭代下一个起点
+                            prev_x, prev_y = rx, ry
 
                 # 采集范围圈
                 self.canvas.create_oval(bbox_picking, outline="yellow",dash=(4,2), width=1, tags="player_indicator")
@@ -775,6 +822,58 @@ class MapTrackerApp:
             return all_kp, final_des
         return [], None
 
+    def calculate_collection_route(self, start_x, start_y, num_points=10):
+        """
+        计算从指定坐标开始的连续最近采集路线
+        """
+        # 1. 获取当前需要显示的、未采集的可用资源点
+        valid_markers = []
+        for m in self.marker_data:
+            if m.get('is_collected'):
+                continue
+
+            try:
+                m_type_int = int(m['type'])
+            except ValueError:
+                continue  # 如果还是遇到了非数字，安全跳过该点，不要引发系统崩溃
+
+            # 检查该点位所属的分类是否被选中
+            is_visible = False
+            for category_name in self.resource_type_selected_items:
+                range_min, range_max = resource_type_dicts.get(category_name, (0, 0))
+                if range_min <= m_type_int <= range_max:
+                    is_visible = True
+                    break
+
+            if is_visible:
+                valid_markers.append(m)
+
+        if not valid_markers:
+            return []
+
+        route = []
+        current_x, current_y = start_x, start_y
+        candidates = valid_markers.copy()
+
+        # 2. 贪心算法：每次找距离当前坐标最近的下一个点
+        for _ in range(min(num_points, len(candidates))):
+            nearest_m = None
+            min_dist_sq = float('inf')
+
+            for m in candidates:
+                dist_sq = (m['pixel_x'] - current_x) ** 2 + (m['pixel_y'] - current_y) ** 2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    nearest_m = m
+
+            if nearest_m:
+                route.append(nearest_m)
+                candidates.remove(nearest_m)
+                # 更新当前坐标为刚找到的资源点，以便寻找下一段路线
+                current_x, current_y = nearest_m['pixel_x'], nearest_m['pixel_y']
+
+        return route
+
     def load_picking_data(self,json_path):
         """从 json 加载已采集的 ID 列表"""
         if os.path.exists(json_path):
@@ -855,6 +954,9 @@ class MapTrackerApp:
                                     continue
 
                                 m_id = point.get('id')
+                                m_type_raw = point.get('markType')
+                                if m_type_raw is None or not str(m_type_raw).isdigit():
+                                    continue
 
                                 # 核心换算公式
                                 px = int((lng / TILE_SIZE - X_MIN) * TILE_SIZE * SCALE)
@@ -862,7 +964,7 @@ class MapTrackerApp:
 
                                 processed_markers.append({
                                     'id': m_id,
-                                    'type': str(point.get('markType')),
+                                    'type': str(m_type_raw),
                                     'pixel_x': px,
                                     'pixel_y': py,
                                     'is_collected': m_id in collected_ids
@@ -1101,6 +1203,10 @@ class MapTrackerApp:
         BigMapWindow(self.root, pil_full_map, self.marker_data, self.icon_cache, self.resource_type_selected_items)
 
     def on_window_configure(self, event):
+        # 增加类型判断
+        if event.widget != self.root:
+            return
+
         # 标记正在拖动
         self.is_dragging = True
         if DEBUG_MODE:
@@ -1150,6 +1256,10 @@ class MapTrackerApp:
     def init_big_map_features(self):
         cache_file = config.FEATURES_PATH
 
+        # 构建地图特征池提示
+        self.status_label.config(text="正在构建地图特征池，请稍候...")
+        self.root.update()  # 刷新文字
+
         # 检查缓存是否存在
         if os.path.exists(cache_file):
             try:
@@ -1159,9 +1269,13 @@ class MapTrackerApp:
                 return
             except Exception as e:
                 log_step(f"缓存读取失败，重新计算中... {e}")
-
+        
         # 如果缓存不存在，则正常计算
         log_step("正在初次计算大地图特征点，请稍候...")
+
+        self.status_label.config(text="正在构建地图特征池：计算 ORB 特征点 (耗时较长)...")
+        self.root.update()  # 再次刷新
+
         self.build_multi_scale_feature_pool()
 
         # 计算完成后存入缓存
