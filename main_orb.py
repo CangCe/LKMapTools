@@ -29,7 +29,7 @@ MIN_MATCH_COUNT = config.ORB_MIN_MATCH_COUNT  # 增加最小匹配数要求
 CONFIG_FILE = "config.json"
 MATCHTYPE = config.MATCHTYPE
 selector_event = threading.Event()
-WINDOW_GEOMETRY = "400x630+1500+100"
+WINDOW_GEOMETRY = "400x660+1500+100"
 resource_type_dicts = {
     "矿物资源":(701,704),
     "非矿物资源": (705,737),
@@ -279,7 +279,7 @@ class MapTrackerApp:
         self.ui_lock_var = tk.BooleanVar(value=False)
         self.ui_lock_cb = tk.Checkbutton(
             root,
-            text="开启UI锁定【快捷键:alt+L】",
+            text="开启UI锁定【快捷键:alt+L】*需要管理员运行程序",
             variable=self.ui_lock_var,
             bg='#2b2b2b',
             fg='white',
@@ -733,7 +733,7 @@ class MapTrackerApp:
                 self.canvas.itemconfigure("all", state="hidden")
 
                 # 显示或更新提示文字
-                self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！\n建议全屏运行游戏以保证可捕捉的小地图截图最大"
+                self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！\n建议全屏游戏以保证小地图显示最大\n\n在此页面卡住超过10分钟\n是win显示设置缩放不为100%导致的"
                 center_pt = config.VIEW_SIZE // 2
 
                 if not self.status_text_id:
