@@ -526,18 +526,41 @@ class MapTrackerApp:
                 x1, y1 = center_x - half_view, center_y - half_view
                 x2, y2 = center_x + half_view, center_y + half_view
 
-                # 裁剪底图
-                display_crop = self.logic_map_bgr[max(0,y1):min(self.map_height,y2),
-                                                  max(0,x1):min(self.map_width,x2)].copy()
-                pil_bg = Image.fromarray(cv2.cvtColor(display_crop, cv2.COLOR_BGR2RGB))
+                # 大地地图边缘越界情况处理
+                bg_canvas = np.zeros((config.VIEW_SIZE, config.VIEW_SIZE, 3), dtype=np.uint8)
+                bg_canvas[:] = (43, 43, 43)
+
+                # 计算在原图上截取的合法范围
+                map_x1, map_y1 = max(0, x1), max(0, y1)
+                map_x2, map_y2 = min(self.map_width, x2), min(self.map_height, y2)
+
+                # 只有当截取范围有效时才进行像素复制
+                if map_x1 < map_x2 and map_y1 < map_y2:
+                    # 计算在固定底板(bg_canvas)上的粘贴范围 (自动处理负坐标导致的偏移量)
+                    paste_x1 = map_x1 - x1
+                    paste_y1 = map_y1 - y1
+                    paste_x2 = paste_x1 + (map_x2 - map_x1)
+                    paste_y2 = paste_y1 + (map_y2 - map_y1)
+
+                    # 将合法部分的地图贴到底板上，确保坐标系绝对对齐
+                    bg_canvas[paste_y1:paste_y2, paste_x1:paste_x2] = self.logic_map_bgr[map_y1:map_y2, map_x1:map_x2]
+
+                # 将拼合好的底板转换为图片
+                pil_bg = Image.fromarray(cv2.cvtColor(bg_canvas, cv2.COLOR_BGR2RGB))
                 self.tk_bg_image = ImageTk.PhotoImage(pil_bg)
+
+                # # 裁剪底图
+                # display_crop = self.logic_map_bgr[max(0,y1):min(self.map_height,y2),
+                #                                   max(0,x1):min(self.map_width,x2)].copy()
+                # pil_bg = Image.fromarray(cv2.cvtColor(display_crop, cv2.COLOR_BGR2RGB))
+                # self.tk_bg_image = ImageTk.PhotoImage(pil_bg)
 
                 # 更新底层背景图片（如果不存在则创建）
                 if not hasattr(self, 'bg_image_id') or self.bg_image_id is None:
                     self.bg_image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_bg_image)
                     self.canvas.tag_lower(self.bg_image_id)  # 确保底图永远在最下层
                 else:
-                    self.canvas.itemconfig(self.bg_image_id, image=self.tk_bg_image)
+                    self.canvas.itemconfig(self.bg_image_id, image=self.tk_bg_image, state="normal")
 
                 # 独立管理图标 (不修改底图像素)
                 if not hasattr(self, 'canvas_icons'):
@@ -635,7 +658,7 @@ class MapTrackerApp:
             self.canvas.itemconfigure("all", state="hidden")
 
             # 显示或更新提示文字
-            self.empty_display_text = "计算匹配定位锚点中..."
+            self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！"
             center_pt = config.VIEW_SIZE // 2
 
             if not self.status_text_id:
