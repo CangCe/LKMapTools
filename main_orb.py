@@ -6,6 +6,8 @@ import traceback
 import cv2
 import numpy as np
 import mss
+import ctypes
+from pynput import keyboard
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
@@ -15,8 +17,13 @@ import config  # <--- 导入同目录下的配置文件
 import subprocess
 import os
 import sys
-# 参数
 
+# Windows API 常量
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+
+# 参数
 DEBUG_MODE = config.DEBUGMODE
 MIN_MATCH_COUNT = config.ORB_MIN_MATCH_COUNT  # 增加最小匹配数要求
 CONFIG_FILE = "config.json"
@@ -266,6 +273,23 @@ class MapTrackerApp:
         self.canvas = tk.Canvas(root, width=config.VIEW_SIZE, height=config.VIEW_SIZE, bg='#2b2b2b')
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.image_on_canvas = None
+
+        # UI锁定-用于全屏
+        # -- 开启UI锁定
+        self.ui_lock_var = tk.BooleanVar(value=False)
+        self.ui_lock_cb = tk.Checkbutton(
+            root,
+            text="开启UI锁定【快捷键:alt+L】",
+            variable=self.ui_lock_var,
+            bg='#2b2b2b',
+            fg='white',
+            selectcolor='#3c3f41',
+            activebackground='#2b2b2b',
+            activeforeground='white',
+            command = self.toggle_ui_lock_from_cb  # 绑定点击事件
+        )
+        self.ui_lock_cb.pack(side=tk.BOTTOM, fill=tk.X)
+        self.start_hotkey_listener() #启用快捷键监听
 
         # 重置按钮
         log_step("正在加载按钮")
@@ -709,7 +733,7 @@ class MapTrackerApp:
                 self.canvas.itemconfigure("all", state="hidden")
 
                 # 显示或更新提示文字
-                self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！\n建议窗口化运行游戏，全屏可能出现未知bug"
+                self.empty_display_text = "计算匹配定位锚点中...\n请勿用任何窗口遮挡小地图，包括本软件！\n建议全屏运行游戏以保证可捕捉的小地图截图最大"
                 center_pt = config.VIEW_SIZE // 2
 
                 if not self.status_text_id:
@@ -1383,6 +1407,61 @@ class MapTrackerApp:
     def resource_type_get_value(self):
         """获取选中的列表"""
         return self.resource_type_selected_items
+
+    def start_hotkey_listener(self):
+        """使用 pynput 监听全局快捷键"""
+
+        def on_activate():
+            # 当按下 Alt+L 时触发
+            # 注意：pynput 在独立线程运行，修改 UI 必须回到主线程
+            log_step("检测到触发快捷键ALT+L")
+            self.root.after(0, self.hotkey_triggered)
+
+        # 注意：这里的键名必须是小写，组合用 + 号
+        # <alt>+l 代表 Alt + L
+        try:
+            # 实例化 GlobalHotkeys
+            listener = keyboard.GlobalHotKeys({
+                '<alt>+l': on_activate
+            })
+            listener.daemon = True # 设置为守护线程，随主程序退出
+            listener.start()
+            log_step(">>> 快捷键监听已启动 (Alt+L)")
+        except Exception as e:
+            log_step(f">>> 快捷键启动失败: {e}")
+
+    def hotkey_triggered(self):
+        """快捷键触发后的逻辑"""
+        new_state = not self.ui_lock_var.get()
+        self.ui_lock_var.set(new_state)
+        self.apply_ui_lock(new_state)
+
+    def toggle_ui_lock_from_cb(self):
+        """用户通过点击复选框触发"""
+        self.apply_ui_lock(self.ui_lock_var.get())
+
+    def apply_ui_lock(self, is_locked):
+        """执行鼠标穿透逻辑"""
+        if sys.platform != "win32":
+            return
+
+        try:
+            # 获取窗口句柄
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            # 获取当前样式
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+            if is_locked:
+                # 添加透明穿透属性：WS_EX_TRANSPARENT 允许鼠标穿透
+                # WS_EX_LAYERED 是必须的，否则穿透无效
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                self.ui_lock_cb.config(fg="#00FF00") # 锁定状态变绿提醒
+            else:
+                # 移除穿透属性
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & ~WS_EX_TRANSPARENT)
+                self.ui_lock_cb.config(fg="white")
+        except Exception as e:
+            print(f"设置UI锁定失败: {e}")
 
 class MinimapSelector(tk.Toplevel):
     def __init__(self, master):
